@@ -175,3 +175,6 @@ certs/
 
 # Local deployment credentials — never commit
 /inventories/*/group_vars/all/secrets.yml
+
+# Local, per-host Ansible credentials; never commit these files.
+/inventories/prod/host_vars/*/secrets.yml
