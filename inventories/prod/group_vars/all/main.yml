@@ -1,0 +1,19 @@
+# Common
+tier1_enable_k3s: true
+
+digitafrica_namespace: "digitafrica"
+
+tls_mode: "shared"       # Browser-trusted TLS secret is managed by edge-ai-blueprint.
+
+tls_domains:
+  - "ab-01.lab.uvalight.net"
+
+keycloak_tls_secret_name: "jhub-tls"
+
+# Tier1
+tier1:
+  # User-portal
+  user_portal:
+    admin_user: "admin"               # Administrator username
+    postgres_db: keycloak             # PostgreSQL database name
+    postgres_user: keycloak           # PostgreSQL user name

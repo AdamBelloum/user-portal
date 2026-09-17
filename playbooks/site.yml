@@ -1,0 +1,15 @@
+- name: Deploy DIGITAfrica apps on Tier-1 (install)
+  hosts: tier1_server
+  roles:
+    - role: k8s_apps
+      when:
+        - tier1_enable_k3s | default(false) | bool
+        - not (digitafrica_uninstall | default(false) | bool)
+
+- name: Deploy DIGITAfrica apps on Tier-1 (uninstall)
+  hosts: tier1_server
+  roles:
+    - role: k8s_apps
+      when:
+        - tier1_enable_k3s | default(false) | bool
+        - (digitafrica_uninstall | default(false) | bool)

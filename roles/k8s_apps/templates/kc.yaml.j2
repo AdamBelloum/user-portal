@@ -1,0 +1,281 @@
+#apiVersion: v1
+#kind: Namespace
+#metadata:
+#  name: digitafrica
+
+---
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-secret
+  namespace: "{{ digitafrica_namespace }}"
+type: Opaque
+stringData:
+  POSTGRES_DB: {{ tier1.user_portal.postgres_db | quote }}
+  POSTGRES_USER: {{ tier1.user_portal.postgres_user | quote }}
+  POSTGRES_PASSWORD: {{ keycloak_postgres_password | quote }}
+
+---
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: keycloak-secret
+  namespace: "{{ digitafrica_namespace }}"
+type: Opaque
+stringData:
+  KC_DB_PASSWORD: {{ keycloak_postgres_password | quote }}
+  KC_BOOTSTRAP_ADMIN_USERNAME: {{ tier1.user_portal.admin_user | quote }}
+  KC_BOOTSTRAP_ADMIN_PASSWORD: {{ keycloak_bootstrap_admin_password | quote }}
+
+
+---
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keycloak-config
+  namespace: "{{ digitafrica_namespace }}"
+data:
+  KC_DB: "postgres"
+  KC_DB_URL_HOST: "postgres"
+  KC_DB_URL_DATABASE: {{ tier1.user_portal.postgres_db | quote }}
+  KC_DB_USERNAME: {{ tier1.user_portal.postgres_user | quote }}
+  KC_HTTP_ENABLED: "false"
+  KC_HOSTNAME: {{ ("https://" ~ tls_domains[0] ~ "/keycloak") | quote }}
+  KC_HTTP_RELATIVE_PATH: "/keycloak"
+  KC_HOSTNAME_STRICT: "true"
+  KC_PROXY_HEADERS: "xforwarded"
+  KC_HTTPS_CERTIFICATE_FILE: "/opt/keycloak/certs/tls.crt"
+  KC_HTTPS_CERTIFICATE_KEY_FILE: "/opt/keycloak/certs/tls.key"
+
+---
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: "{{ digitafrica_namespace }}"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: "{{ digitafrica_namespace }}"
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16
+          envFrom:
+            - secretRef:
+                name: postgres-secret
+          volumeMounts:
+            - mountPath: /var/lib/postgresql/data
+              name: postgres-data
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - pg_isready -U keycloak -d keycloak
+            initialDelaySeconds: 5
+            periodSeconds: 5
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: "{{ digitafrica_namespace }}"
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+
+
+---
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: "{{ digitafrica_namespace }}"
+spec:
+  serviceName: redis
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          args: ["redis-server","--appendonly","yes"]
+          volumeMounts:
+            - mountPath: /data
+              name: redis-data
+          readinessProbe:
+            exec:
+              command: ["redis-cli","ping"]
+            periodSeconds: 5
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: "{{ digitafrica_namespace }}"
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+
+
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  namespace: "{{ digitafrica_namespace }}"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: keycloak
+  template:
+    metadata:
+      labels:
+        app: keycloak
+    spec:
+      containers:
+        - name: keycloak
+          image: quay.io/keycloak/keycloak:26.5.0
+          args: ["start", "--https-port=8443", "--http-enabled=false"]
+          envFrom:
+            - configMapRef:
+                name: keycloak-config
+            - secretRef:
+                name: keycloak-secret
+          ports:
+            - name: https
+              containerPort: 8443
+          volumeMounts:
+            - name: certs
+              mountPath: /opt/keycloak/certs
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /keycloak/realms/master
+              port: 8443
+              scheme: HTTPS
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: certs
+          secret:
+            secretName: {{ keycloak_tls_secret_name | quote }}
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: "{{ digitafrica_namespace }}"
+  annotations:
+    traefik.ingress.kubernetes.io/service.serverstransport: "{{ digitafrica_namespace }}-{{ keycloak_backend_servers_transport_name | default('keycloak-backend') }}@kubernetescrd"
+spec:
+  type: ClusterIP
+  selector:
+    app: keycloak
+  ports:
+    - name: https
+      port: 8443
+      targetPort: https
+
+---
+apiVersion: traefik.io/v1alpha1
+kind: ServersTransport
+metadata:
+  name: {{ keycloak_backend_servers_transport_name | default('keycloak-backend') | quote }}
+  namespace: {{ digitafrica_namespace | quote }}
+spec:
+{% if (keycloak_backend_ca_path | default('') | length) > 0 %}
+  rootCAsSecrets:
+    - {{ keycloak_backend_ca_secret_name | default('keycloak-backend-ca') | quote }}
+{% endif %}
+  serverName: {{ tls_domains[0] | quote }}
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: keycloak-public-https
+  namespace: "{{ digitafrica_namespace }}"
+  annotations:
+    kubernetes.io/ingress.class: traefik
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    traefik.ingress.kubernetes.io/service.serversscheme: https
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - {{ tls_domains[0] | quote }}
+      secretName: "{{ keycloak_tls_secret_name }}"
+  rules:
+    - host: {{ tls_domains[0] | quote }}
+      http:
+        paths:
+          - path: /keycloak
+            pathType: Prefix
+            backend:
+              service:
+                name: keycloak
+                port:
+                  name: https

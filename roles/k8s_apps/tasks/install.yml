@@ -1,0 +1,135 @@
+- name: Validate secure Keycloak deployment prerequisites
+  ansible.builtin.assert:
+    that:
+      - tls_mode | lower == 'shared'
+      - tls_domains | length > 0
+      - keycloak_tls_secret_name | length > 0
+      - keycloak_postgres_password is defined
+      - keycloak_bootstrap_admin_password is defined
+    fail_msg: >-
+      Keycloak OIDC deployment requires tls_mode: shared, at least one TLS
+      domain, a platform-managed TLS-secret name, and locally supplied
+      database and bootstrap-admin secret values. Self-signed TLS is
+      intentionally not supported.
+  no_log: true
+
+- name: Ensure protected Keycloak deployment directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  loop:
+    - /opt/digitafrica/k8s
+  become: true
+
+- name: Check optional Keycloak backend CA certificate
+  ansible.builtin.stat:
+    path: "{{ keycloak_backend_ca_path }}"
+  register: keycloak_backend_ca_file
+  become: true
+  when: (keycloak_backend_ca_path | default('') | length) > 0
+
+- name: Require optional Keycloak backend CA certificate
+  ansible.builtin.assert:
+    that:
+      - keycloak_backend_ca_file.stat.exists
+      - keycloak_backend_ca_file.stat.isreg
+    fail_msg: >-
+      Missing Keycloak backend CA certificate at {{ keycloak_backend_ca_path }}.
+      Provision the public CA certificate before deployment.
+  no_log: true
+  when: (keycloak_backend_ca_path | default('') | length) > 0
+
+- name: Render protected Keycloak Kubernetes manifest
+  ansible.builtin.template:
+    src: kc.yaml.j2
+    dest: /opt/digitafrica/k8s/kc.yaml
+    owner: root
+    group: root
+    mode: "0600"
+  become: true
+  no_log: true
+
+- name: Ensure DIGITAfrica namespace exists
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+    k3s kubectl get namespace {{ digitafrica_namespace | quote }} >/dev/null 2>&1 \
+      || k3s kubectl create namespace {{ digitafrica_namespace | quote }}
+  args:
+    executable: /bin/bash
+  become: true
+
+- name: Wait for platform-managed shared TLS secret
+  ansible.builtin.command:
+    argv:
+      - k3s
+      - kubectl
+      - --namespace
+      - "{{ digitafrica_namespace }}"
+      - get
+      - secret
+      - "{{ keycloak_tls_secret_name }}"
+  register: keycloak_shared_tls_secret
+  retries: 120
+  delay: 5
+  until: keycloak_shared_tls_secret.rc == 0
+  changed_when: false
+  become: true
+
+- name: Create or update Keycloak backend CA secret idempotently
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+    k3s kubectl --namespace {{ digitafrica_namespace | quote }} \
+      create secret generic {{ keycloak_backend_ca_secret_name | default('keycloak-backend-ca') | quote }} \
+      --from-file=ca.crt={{ keycloak_backend_ca_path | quote }} \
+      --dry-run=client -o yaml \
+      | k3s kubectl apply -f -
+  args:
+    executable: /bin/bash
+  become: true
+  no_log: true
+  when: (keycloak_backend_ca_path | default('') | length) > 0
+
+- name: Apply Keycloak, PostgreSQL, and Redis manifest idempotently
+  ansible.builtin.command:
+    argv:
+      - k3s
+      - kubectl
+      - --namespace
+      - "{{ digitafrica_namespace }}"
+      - apply
+      - --filename=/opt/digitafrica/k8s/kc.yaml
+  become: true
+  no_log: true
+
+- name: Wait for PostgreSQL rollout
+  ansible.builtin.command:
+    argv:
+      - k3s
+      - kubectl
+      - --namespace
+      - "{{ digitafrica_namespace }}"
+      - rollout
+      - status
+      - statefulset/postgres
+      - --timeout=300s
+  become: true
+  changed_when: false
+
+- name: Wait for Keycloak rollout
+  ansible.builtin.command:
+    argv:
+      - k3s
+      - kubectl
+      - --namespace
+      - "{{ digitafrica_namespace }}"
+      - rollout
+      - status
+      - deployment/keycloak
+      - --timeout=300s
+  become: true
+  changed_when: false

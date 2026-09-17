@@ -1,0 +1,60 @@
+- name: Require explicit confirmation before removing the user portal
+  ansible.builtin.assert:
+    that:
+      - digitafrica_confirm_user_portal_uninstall | default(false) | bool
+    fail_msg: >-
+      Refusing user-portal uninstall. Re-run with
+      -e digitafrica_confirm_user_portal_uninstall=true after confirming that
+      Keycloak, PostgreSQL, and Redis may be stopped. Persistent data, the
+      namespace, and the trusted TLS secret are preserved by default.
+
+- name: Remove user-portal workloads and non-TLS configuration
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+
+    k3s kubectl --namespace {{ digitafrica_namespace | quote }} \
+      delete deployment/keycloak --ignore-not-found
+    k3s kubectl --namespace {{ digitafrica_namespace | quote }} \
+      delete statefulset/postgres statefulset/redis --ignore-not-found
+    k3s kubectl --namespace {{ digitafrica_namespace | quote }} \
+      delete service/keycloak service/postgres service/redis --ignore-not-found
+    k3s kubectl --namespace {{ digitafrica_namespace | quote }} \
+      delete ingress/keycloak-public-https --ignore-not-found
+    k3s kubectl --namespace {{ digitafrica_namespace | quote }} \
+      delete configmap/keycloak-config --ignore-not-found
+    k3s kubectl --namespace {{ digitafrica_namespace | quote }} \
+      delete secret/postgres-secret secret/keycloak-secret --ignore-not-found
+  args:
+    executable: /bin/bash
+  become: true
+
+
+- name: Remove optional Keycloak backend trust configuration
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+
+    k3s kubectl --namespace {{ digitafrica_namespace | quote }} \
+      delete secret/{{ keycloak_backend_ca_secret_name | default('keycloak-backend-ca') | quote }} \
+      --ignore-not-found
+    k3s kubectl --namespace {{ digitafrica_namespace | quote }} \
+      delete serverstransports.traefik.io/{{ keycloak_backend_servers_transport_name | default('keycloak-backend') | quote }} \
+      --ignore-not-found
+  args:
+    executable: /bin/bash
+  become: true
+  when: (keycloak_backend_ca_path | default('') | length) > 0
+
+- name: Remove user-portal persistent data only when explicitly requested
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+
+    k3s kubectl --namespace {{ digitafrica_namespace | quote }} \
+      delete pvc/postgres-data-postgres-0 pvc/redis-data-redis-0 \
+      --ignore-not-found
+  args:
+    executable: /bin/bash
+  become: true
+  when: digitafrica_remove_user_portal_data | default(false) | bool
