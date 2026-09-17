@@ -172,3 +172,6 @@ certs/
 # Local standalone TLS override for this control host; never commit it.
 #/vars/ may later contain tracked examples or shared non-secret configuration.
 /vars/standalone-tls.yml
+
+# Local deployment credentials — never commit
+/inventories/*/group_vars/all/secrets.yml
